@@ -13,14 +13,15 @@ from config import Config
 from model import AGHindiSLM
 
 
-def load_model(ckpt_path: str, device="cpu") -> tuple[AGHindiSLM, Config]:
-    ckpt = torch.load(ckpt_path, map_location=device)
+def load_model(ckpt_path: str, device="cpu") -> tuple[AGHindiSLM, Config, int]:
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg: Config = ckpt["config"]
     model = AGHindiSLM(cfg, device=torch.device(device))
     model.load_state_dict(ckpt["model"])
     model.eval()
-    print(f"Loaded step={ckpt['step']} | loss={ckpt['loss']:.4f} | params={model.num_params()/1e6:.2f}M")
-    return model, cfg
+    step = ckpt.get("step", 0)
+    print(f"Loaded step={step} | loss={ckpt.get('loss', '?')} | params={model.num_params()/1e6:.2f}M")
+    return model, cfg, step
 
 
 def save_local(model: AGHindiSLM, cfg: Config, out_path: str):
@@ -28,58 +29,35 @@ def save_local(model: AGHindiSLM, cfg: Config, out_path: str):
     print(f"Saved → {out_path}")
 
 
-def push_to_hub(model: AGHindiSLM, cfg: Config, repo_id: str):
+def push_to_hub(model: AGHindiSLM, cfg: Config, repo_id: str, step: int = 0):
     from huggingface_hub import HfApi, upload_file
     import tempfile, os
 
     api = HfApi()
     api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True)
 
+    # store each checkpoint in its own subfolder e.g. step-5000/model.pt
+    subfolder = f"step-{step:05d}" if step else "latest"
+
     with tempfile.TemporaryDirectory() as tmp:
-        # Save weights
         weights_path = os.path.join(tmp, "model.pt")
-        torch.save({"model": model.state_dict(), "config": cfg}, weights_path)
+        torch.save({"model": model.state_dict(), "config": cfg, "step": step}, weights_path)
 
-        # Simple model card
-        card_path = os.path.join(tmp, "README.md")
-        with open(card_path, "w") as f:
-            f.write(f"""---
-language: hi
-tags:
-  - hindi
-  - language-model
-  - pretraining
----
+        upload_file(path_or_fileobj=weights_path, path_in_repo=f"{subfolder}/model.pt", repo_id=repo_id)
 
-# AG Hindi SLM
+    # always keep latest/ in sync too
+    if step:
+        with tempfile.TemporaryDirectory() as tmp:
+            weights_path = os.path.join(tmp, "model.pt")
+            torch.save({"model": model.state_dict(), "config": cfg, "step": step}, weights_path)
+            upload_file(path_or_fileobj=weights_path, path_in_repo="latest/model.pt", repo_id=repo_id)
 
-~{model.num_params()/1e6:.0f}M parameter Hindi language model.
+    # upload code files once (idempotent)
+    for fname in ["model.py", "config.py", "pipeline.py"]:
+        if os.path.exists(fname):
+            upload_file(path_or_fileobj=fname, path_in_repo=fname, repo_id=repo_id)
 
-Architecture: MLA Attention + Block AttnRes + SwiGLU  
-Training data: Hindi Wikipedia + ai4bharat/sangraha (verified + unverified)  
-Params: d_model={cfg.d_model}, n_layers={cfg.n_layers}, n_heads={cfg.n_heads}
-
-## Load model
-
-```python
-import torch
-from model import AGHindiSLM
-
-ckpt = torch.load("model.pt", map_location="cpu")
-model = AGHindiSLM(ckpt["config"])
-model.load_state_dict(ckpt["model"])
-model.eval()
-```
-""")
-
-        upload_file(path_or_fileobj=weights_path, path_in_repo="model.pt", repo_id=repo_id)
-        upload_file(path_or_fileobj=card_path,    path_in_repo="README.md", repo_id=repo_id)
-        # Also upload model.py and config.py so the repo is self-contained
-        for fname in ["model.py", "config.py"]:
-            if os.path.exists(fname):
-                upload_file(path_or_fileobj=fname, path_in_repo=fname, repo_id=repo_id)
-
-    print(f"Pushed → https://huggingface.co/{repo_id}")
+    print(f"Pushed → https://huggingface.co/{repo_id}/{subfolder}")
 
 
 def main():
@@ -90,11 +68,11 @@ def main():
     parser.add_argument("--repo",  default="", help="HuggingFace repo id, e.g. username/ag-hindi-slm")
     args = parser.parse_args()
 
-    model, cfg = load_model(args.ckpt)
+    model, cfg, step = load_model(args.ckpt)
 
     if args.push:
         assert args.repo, "Provide --repo username/model-name"
-        push_to_hub(model, cfg, args.repo)
+        push_to_hub(model, cfg, args.repo, step=step)
     else:
         save_local(model, cfg, args.out)
 
