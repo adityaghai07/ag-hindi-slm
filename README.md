@@ -12,7 +12,7 @@ A 225M parameter Hindi language model trained from scratch on ~4B tokens.
 
 ## Loss Curve
 
-![Loss Curve](logs/loss_curve.png)
+![Loss Curve](loss_curve.png)
 
 | Step  | Loss  | Tokens seen |
 |-------|-------|-------------|
