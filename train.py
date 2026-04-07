@@ -3,11 +3,41 @@ import math
 import time
 import torch
 
-
 from config import Config, get_lr
 from model import AGHindiSLM, build_optimizer
-
 from data import load_tokenizer, load_data, BatchSampler
+from logger import TrainLogger
+
+
+HF_REPO = os.environ.get("HF_REPO", "")
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+
+
+def push_to_hub(step: int, ckpt_path: str, model, cfg):
+    if not HF_REPO or not HF_TOKEN:
+        return
+    try:
+        from huggingface_hub import HfApi
+        import tempfile
+        api = HfApi(token=HF_TOKEN)
+        subfolder = f"step-{step:05d}"
+
+        # push checkpoint (weights only, no optimizer)
+        with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+            torch.save({"model": model.state_dict(), "config": cfg, "step": step}, f.name)
+            api.upload_file(path_or_fileobj=f.name, path_in_repo=f"{subfolder}/model.pt", repo_id=HF_REPO)
+            api.upload_file(path_or_fileobj=f.name, path_in_repo="latest/model.pt", repo_id=HF_REPO)
+            os.unlink(f.name)
+
+        # push logs and plot
+        if os.path.isfile("logs/train_log.json"):
+            api.upload_file(path_or_fileobj="logs/train_log.json", path_in_repo="logs/train_log.json", repo_id=HF_REPO)
+        if os.path.isfile("logs/loss_curve.png"):
+            api.upload_file(path_or_fileobj="logs/loss_curve.png", path_in_repo="logs/loss_curve.png", repo_id=HF_REPO)
+
+        print(f"  Hub → {HF_REPO}/{subfolder}")
+    except Exception as e:
+        print(f"  Hub push failed (non-fatal): {e}")
 
 
 
@@ -119,6 +149,7 @@ def train():
     optimizer.zero_grad(set_to_none=True)
     losses = []
     t_start = time.time()
+    logger = TrainLogger(log_dir="logs")
 
     for step in range(start_step, cfg.max_steps + 1):
         t_step = time.time()
@@ -159,20 +190,17 @@ def train():
 
 
         if step % cfg.log_every == 0:
-
             avg_loss = sum(losses[-cfg.log_every:]) / cfg.log_every
-
             vram = torch.cuda.max_memory_allocated() / 1e9
+            logger.log(step, avg_loss, lr, float(grad_norm), tok_per_sec, vram)
             print(
-
                 f"step {step:5d}/{cfg.max_steps} | loss {avg_loss:.4f} | "
-
                 f"gnorm {grad_norm:.3f} | lr {lr:.2e} | "
-
                 f"{tok_per_sec/1000:.1f}K tok/s | VRAM {vram:.1f}GB | "
-
                 f"elapsed {(time.time()-t_start)/60:.1f}m"
             )
+            if step % (cfg.log_every * 10) == 0:
+                logger.plot()
 
 
         if step % cfg.sample_every == 0:
@@ -190,17 +218,17 @@ def train():
 
 
         if step % cfg.save_every == 0:
-
             path = os.path.join(cfg.ckpt_dir, f"step_{step:05d}.pt")
-
             torch.save({"step": step, "model": model.state_dict(), "optimizer": optimizer.state_dict(), "config": cfg, "loss": step_loss}, path)
-
             print(f"  Checkpoint → {path}")
+            logger.plot()
+            push_to_hub(step, path, model, cfg)
 
 
     total = time.time() - t_start
-
+    logger.plot()
     print(f"\nDone in {total/60:.1f}m | final loss {losses[-1]:.4f} | best {min(losses):.4f}")
+    print(f"Logs → logs/train_log.json | Plot → logs/loss_curve.png")
 
 
     for prompt in ["भारत एक महान देश", "हिन्दी भाषा", "दिल्ली में"]:

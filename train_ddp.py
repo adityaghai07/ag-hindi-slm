@@ -2,7 +2,7 @@
 
 DDP training — launch with:
 
-  torchrun --nproc_per_node=4 train_ddp.py
+  torchrun --nproc_per_node=3 train_ddp.py
 """
 import os
 import time
@@ -18,8 +18,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from config import Config, get_lr
 from model import AGHindiSLM, build_optimizer
-
 from data import load_tokenizer, load_data, BatchSampler
+from logger import TrainLogger
+from train import push_to_hub
 
 
 
@@ -112,6 +113,7 @@ def train():
     optimizer.zero_grad(set_to_none=True)
     losses = []
     t_start = time.time()
+    logger = TrainLogger(log_dir="logs") if is_master else None
 
     for step in range(start_step, cfg.max_steps + 1):
         t_step = time.time()
@@ -164,20 +166,17 @@ def train():
 
 
             if step % cfg.log_every == 0:
-
                 avg_loss = sum(losses[-cfg.log_every:]) / cfg.log_every
-
                 vram = torch.cuda.max_memory_allocated() / 1e9
+                logger.log(step, avg_loss, lr, float(grad_norm), tok_per_sec, vram)
                 print(
-
                     f"step {step:5d}/{cfg.max_steps} | loss {avg_loss:.4f} | "
-
                     f"gnorm {grad_norm:.3f} | lr {lr:.2e} | "
-
                     f"{tok_per_sec/1000:.1f}K tok/s | VRAM {vram:.1f}GB | "
-
                     f"elapsed {(time.time()-t_start)/60:.1f}m"
                 )
+                if step % (cfg.log_every * 10) == 0:
+                    logger.plot()
 
 
             if step % cfg.sample_every == 0:
@@ -195,31 +194,24 @@ def train():
 
 
             if step % cfg.save_every == 0:
-
                 path = os.path.join(cfg.ckpt_dir, f"step_{step:05d}.pt")
-
                 torch.save({
-
                     "step": step,
-
                     "model": raw_model.state_dict(),
-
                     "optimizer": optimizer.state_dict(),
-
                     "config": cfg,
-
                     "loss": step_loss,
-
                 }, path)
-
                 print(f"  Checkpoint → {path}")
+                logger.plot()
+                push_to_hub(step, path, raw_model, cfg)
 
 
     if is_master:
-
         total = time.time() - t_start
-
+        logger.plot()
         print(f"\nDone in {total/60:.1f}m | final loss {losses[-1]:.4f} | best {min(losses):.4f}")
+        print(f"Logs → logs/train_log.json | Plot → logs/loss_curve.png")
 
 
     cleanup_ddp()

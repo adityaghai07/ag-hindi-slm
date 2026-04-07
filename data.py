@@ -42,7 +42,13 @@ def _stream(name, config=None, data_dir=None):
     return load_dataset(name, **kwargs)
 
 
-def load_data(cfg: Config, tokenizer, target_tokens: int = 3_000_000_000):
+def load_data(cfg: Config, tokenizer, target_tokens: int = 500_000_000, cache_path: str = "token_cache.pt"):
+    import os
+    if cache_path and os.path.isfile(cache_path):
+        print(f"Loading token cache from {cache_path}...")
+        token_chunks = torch.load(cache_path)
+        print(f"  token_chunks shape: {token_chunks.shape}")
+        return token_chunks
     from itertools import chain
 
     sources = [
